@@ -9,10 +9,12 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_DIRECTORY = path.join(__dirname, 'data');
 const CONFIG_FILE = path.join(DATA_DIRECTORY, 'config.json');
 const CACHE_DIRECTORY = path.join(DATA_DIRECTORY, 'cache');
-const FMP_BASE_URL = 'https://financialmodelingprep.com';
 const TOSS_BASE_URL = 'https://openapi.tossinvest.com';
-const FUNDAMENTALS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const SEC_COMPANY_FACTS_BASE_URL = 'https://data.sec.gov/api/xbrl/companyfacts';
+const SP500_CONSTITUENTS_CSV_URL = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv';
+const ACTUALS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CONSTITUENTS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SEC_REQUEST_INTERVAL_MS = 125;
 
 const app = express();
 app.disable('x-powered-by');
@@ -20,6 +22,7 @@ app.use(express.json({ limit: '16kb' }));
 
 let tokenCache = { accessToken: null, expiresAt: 0 };
 let currentScreenPromise = null;
+let nextSecRequestAt = 0;
 
 class ExternalServiceError extends Error {
   constructor(service, message, status) {
@@ -91,8 +94,8 @@ function envConfig() {
   return {
     tossClientId: process.env.TOSS_CLIENT_ID?.trim() || '',
     tossClientSecret: process.env.TOSS_CLIENT_SECRET?.trim() || '',
-    fmpApiKey: process.env.FMP_API_KEY?.trim() || '',
     fredApiKey: process.env.FRED_API_KEY?.trim() || '',
+    secContactEmail: process.env.SEC_CONTACT_EMAIL?.trim() || '',
   };
 }
 
@@ -101,8 +104,8 @@ function mergeConfig(saved = {}) {
   return {
     tossClientId: env.tossClientId || saved.tossClientId || '',
     tossClientSecret: env.tossClientSecret || saved.tossClientSecret || '',
-    fmpApiKey: env.fmpApiKey || saved.fmpApiKey || '',
     fredApiKey: env.fredApiKey || saved.fredApiKey || '',
+    secContactEmail: env.secContactEmail || saved.secContactEmail || '',
   };
 }
 
@@ -111,27 +114,27 @@ async function getConfig() {
 }
 
 function configurationStatus(config) {
+  const secContact = Boolean(config.secContactEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.secContactEmail));
   return {
     toss: Boolean(config.tossClientId && config.tossClientSecret),
-    fmp: Boolean(config.fmpApiKey),
     fred: Boolean(config.fredApiKey),
-    complete: Boolean(config.tossClientId && config.tossClientSecret && config.fmpApiKey && config.fredApiKey),
+    secContact,
+    complete: Boolean(config.tossClientId && config.tossClientSecret && config.fredApiKey && secContact),
   };
 }
 
 async function saveConfig(values) {
   const existing = (await readJsonFile(CONFIG_FILE)) || {};
   const next = { ...existing };
-  for (const key of ['tossClientId', 'tossClientSecret', 'fmpApiKey', 'fredApiKey']) {
+  for (const key of ['tossClientId', 'tossClientSecret', 'fredApiKey', 'secContactEmail']) {
     if (typeof values[key] === 'string' && values[key].trim()) next[key] = values[key].trim();
   }
-  const effectiveConfig = mergeConfig(next);
-  const status = configurationStatus(effectiveConfig);
+  const status = configurationStatus(mergeConfig(next));
   if (!status.complete) {
     const labels = {
       toss: '토스 Client ID 또는 Client Secret',
-      fmp: 'FMP API Key',
       fred: 'FRED API Key',
+      secContact: 'SEC 연락처 이메일(유효한 이메일 형식)',
     };
     const missing = Object.entries(status)
       .filter(([key, present]) => key !== 'complete' && !present)
@@ -178,6 +181,18 @@ async function fetchJson(url, options, service) {
     throw new ExternalServiceError(service, `${service} 요청 실패 (${response.status}): ${detail}`, response.status);
   }
   return payload;
+}
+
+async function fetchText(url, service) {
+  let response;
+  try {
+    response = await fetch(url);
+  } catch {
+    throw new ExternalServiceError(service, `${service} 서버에 연결하지 못했습니다. 네트워크 연결을 확인해 주세요.`);
+  }
+  const text = await response.text();
+  if (!response.ok) throw new ExternalServiceError(service, `${service} 요청 실패 (${response.status}): ${text || '요청이 거부되었습니다.'}`, response.status);
+  return text;
 }
 
 async function getTossToken(config) {
@@ -234,82 +249,102 @@ async function getTossLiveData(symbols, config) {
   return { priceBySymbol, stockBySymbol };
 }
 
-async function fmpRequest(config, stablePath, legacyPath) {
-  const urls = [
-    `${FMP_BASE_URL}${stablePath}${stablePath.includes('?') ? '&' : '?'}apikey=${encodeURIComponent(config.fmpApiKey)}`,
-    ...(legacyPath ? [`${FMP_BASE_URL}${legacyPath}${legacyPath.includes('?') ? '&' : '?'}apikey=${encodeURIComponent(config.fmpApiKey)}`] : []),
-  ];
-  let lastError;
-  for (const url of urls) {
-    try {
-      return await fetchJson(url, {}, 'FMP');
-    } catch (error) {
-      lastError = error;
-      if (!(error instanceof ExternalServiceError) || ![404, 405].includes(error.status)) break;
+function parseCsvLine(line) {
+  const values = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (character === '"') {
+      if (quoted && line[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (character === ',' && !quoted) {
+      values.push(value);
+      value = '';
+    } else {
+      value += character;
     }
   }
-  throw lastError;
+  values.push(value);
+  return values;
 }
 
-async function getConstituents(config, forceRefresh) {
+async function getConstituents(forceRefresh) {
   if (!forceRefresh) {
     const cached = await getCached('sp500-constituents', CONSTITUENTS_CACHE_TTL_MS);
     if (cached) return cached;
   }
-  const payload = await fmpRequest(config, '/stable/sp500-constituent', '/api/v3/sp500_constituent');
+  const csv = await fetchText(SP500_CONSTITUENTS_CSV_URL, 'S&P 500 구성종목 데이터');
+  const [header, ...lines] = csv.trim().split(/\r?\n/);
+  const columns = parseCsvLine(header);
+  const columnIndex = (name) => columns.indexOf(name);
+  const symbolIndex = columnIndex('Symbol');
+  const nameIndex = columnIndex('Security');
+  const sectorIndex = columnIndex('GICS Sector');
+  const cikIndex = columnIndex('CIK');
   const seen = new Set();
-  const constituents = getList(payload)
-    .map((item) => ({
-      symbol: String(item?.symbol || '').toUpperCase(),
-      name: item?.name || item?.companyName || item?.security || '',
-      sector: item?.sector || '',
+  const constituents = lines
+    .map(parseCsvLine)
+    .map((row) => ({
+      symbol: String(row[symbolIndex] || '').toUpperCase(),
+      name: row[nameIndex] || '',
+      sector: row[sectorIndex] || '',
+      cik: String(row[cikIndex] || '').replaceAll(/\D/g, '').padStart(10, '0'),
     }))
-    .filter((item) => item.symbol && !seen.has(item.symbol) && seen.add(item.symbol));
+    .filter((item) => item.symbol && item.cik && !seen.has(item.symbol) && seen.add(item.symbol));
   if (constituents.length < 400) {
-    throw new ExternalServiceError('FMP', `S&P 500 구성종목을 충분히 받지 못했습니다 (${constituents.length}개). FMP 구독 권한과 API 키를 확인해 주세요.`);
+    throw new ExternalServiceError('S&P 500 구성종목 데이터', `구성종목을 충분히 받지 못했습니다 (${constituents.length}개).`);
   }
   await setCached('sp500-constituents', constituents);
   return constituents;
 }
 
-function dateYear(value) {
-  const match = String(value || '').match(/^(\d{4})/);
-  return match ? Number(match[1]) : null;
+async function secRequest(cik, config) {
+  const scheduledAt = Math.max(Date.now(), nextSecRequestAt);
+  nextSecRequestAt = scheduledAt + SEC_REQUEST_INTERVAL_MS;
+  await sleep(Math.max(0, scheduledAt - Date.now()));
+  return fetchJson(`${SEC_COMPANY_FACTS_BASE_URL}/CIK${cik}.json`, {
+    headers: {
+      'User-Agent': `sp500-treasury-screener/1.0 ${config.secContactEmail}`,
+      'Accept-Encoding': 'gzip, deflate',
+    },
+  }, 'SEC EDGAR');
 }
 
-function getForecastNetIncome(record) {
-  return pickNumber(
-    record?.estimatedNetIncomeAvg,
-    record?.estimatedNetIncome,
-    record?.netIncomeAvg,
-    record?.netIncome,
-    record?.estimatedNetIncomeLow,
-  );
-}
+function extractTtmNetIncome(companyFacts) {
+  const facts = companyFacts?.facts?.['us-gaap']?.NetIncomeLoss?.units?.USD;
+  if (!Array.isArray(facts)) return null;
+  const acceptedForms = new Set(['10-Q', '10-K', '10-Q/A', '10-K/A']);
+  const quarterlyByFrame = new Map();
+  for (const fact of facts) {
+    if (!acceptedForms.has(fact.form) || !/^CY\d{4}Q[1-4]$/.test(fact.frame || '') || toNumber(fact.val) === null) continue;
+    const previous = quarterlyByFrame.get(fact.frame);
+    if (!previous || String(fact.filed || '') > String(previous.filed || '')) quarterlyByFrame.set(fact.frame, fact);
+  }
+  const quarters = [...quarterlyByFrame.values()].sort((left, right) => String(left.end).localeCompare(String(right.end)));
+  if (quarters.length >= 4) {
+    const latestFour = quarters.slice(-4);
+    return {
+      value: latestFour.reduce((sum, fact) => sum + toNumber(fact.val), 0),
+      periodEnd: latestFour.at(-1).end,
+      method: 'SEC EDGAR NetIncomeLoss · 최근 4개 분기 합산',
+    };
+  }
 
-function getForecastEps(record) {
-  return pickNumber(
-    record?.estimatedEpsAvg,
-    record?.estimatedEPSAvg,
-    record?.epsAvg,
-    record?.eps,
-    record?.estimatedEpsLow,
-  );
-}
-
-function chooseNextYearForecast(payload) {
-  const nextYear = new Date().getUTCFullYear() + 1;
-  const records = getList(payload).filter((record) => record && typeof record === 'object');
-  const annual = records.filter((record) => {
-    const period = String(record.period || record.frequency || '').toUpperCase();
-    return !period || period === 'FY' || period === 'ANNUAL';
-  });
-  const candidates = annual.length ? annual : records;
-  const exact = candidates.filter((record) => Number(record.calendarYear) === nextYear || dateYear(record.date || record.fiscalDateEnding) === nextYear);
-  const chronological = (exact.length ? exact : candidates)
-    .slice()
-    .sort((a, b) => String(a.date || a.fiscalDateEnding || '').localeCompare(String(b.date || b.fiscalDateEnding || '')));
-  return chronological[0] || null;
+  const annual = facts
+    .filter((fact) => acceptedForms.has(fact.form) && fact.fp === 'FY' && /^CY\d{4}$/.test(fact.frame || '') && toNumber(fact.val) !== null)
+    .sort((left, right) => String(left.end).localeCompare(String(right.end)));
+  const latestAnnual = annual.at(-1);
+  if (!latestAnnual) return null;
+  return {
+    value: toNumber(latestAnnual.val),
+    periodEnd: latestAnnual.end,
+    method: 'SEC EDGAR NetIncomeLoss · 최근 연간 10-K',
+  };
 }
 
 async function mapWithConcurrency(items, limit, worker) {
@@ -319,7 +354,7 @@ async function mapWithConcurrency(items, limit, worker) {
     while (cursor < items.length) {
       const index = cursor++;
       try {
-        results[index] = await worker(items[index], index);
+        results[index] = await worker(items[index]);
       } catch (error) {
         results[index] = { error: publicError(error) };
       }
@@ -329,33 +364,23 @@ async function mapWithConcurrency(items, limit, worker) {
   return results;
 }
 
-async function getFundamentals(config, forceRefresh) {
+async function getActualIncome(config, forceRefresh) {
   if (!forceRefresh) {
-    const cached = await getCached('forward-estimates', FUNDAMENTALS_CACHE_TTL_MS);
+    const cached = await getCached('ttm-net-income', ACTUALS_CACHE_TTL_MS);
     if (cached) return cached;
   }
-  const constituents = await getConstituents(config, forceRefresh);
+  const constituents = await getConstituents(forceRefresh);
   const details = await mapWithConcurrency(constituents, 5, async (constituent) => {
-    const payload = await fmpRequest(config, `/stable/analyst-estimates?symbol=${encodeURIComponent(constituent.symbol)}`, `/api/v3/analyst-estimates/${encodeURIComponent(constituent.symbol)}`);
-    const forecast = chooseNextYearForecast(payload);
-    if (!forecast) return { ...constituent, forecast: null };
-    return {
-      ...constituent,
-      forecast: {
-        date: forecast.date || forecast.fiscalDateEnding || null,
-        netIncome: getForecastNetIncome(forecast),
-        eps: getForecastEps(forecast),
-      },
-    };
+    const ttm = extractTtmNetIncome(await secRequest(constituent.cik, config));
+    return { ...constituent, ttm };
   });
-
   const errors = details.filter((item) => item?.error);
   const items = details.filter((item) => !item?.error);
   if (!items.length || errors.length === constituents.length) {
-    throw new ExternalServiceError('FMP', errors[0]?.error || '예상 실적 데이터를 받지 못했습니다. FMP API 요금제의 Analyst Estimates 권한을 확인해 주세요.');
+    throw new ExternalServiceError('SEC EDGAR', errors[0]?.error || '실제 순이익 데이터를 받지 못했습니다. SEC 연락처 이메일과 네트워크를 확인해 주세요.');
   }
   const data = { items, failedSymbols: errors.length, generatedAt: new Date().toISOString() };
-  await setCached('forward-estimates', data);
+  await setCached('ttm-net-income', data);
   return data;
 }
 
@@ -373,33 +398,26 @@ async function getTreasuryYield(config) {
   return { value: toNumber(observation.value), date: observation.date, seriesId: 'DGS1' };
 }
 
-function buildRows(fundamentals, live, treasury) {
+function buildRows(actualIncome, live, treasury) {
   const rows = [];
-  let noForecast = 0;
-  let noLivePrice = 0;
+  let missingActualIncome = 0;
+  let missingLiveData = 0;
 
-  for (const item of fundamentals.items) {
+  for (const item of actualIncome.items) {
     const symbol = item.symbol.toUpperCase();
     const price = live.priceBySymbol.get(symbol);
     const stock = live.stockBySymbol.get(symbol);
     if (!price || !stock?.sharesOutstanding) {
-      noLivePrice += 1;
+      missingLiveData += 1;
+      continue;
+    }
+    if (!item.ttm || !Number.isFinite(item.ttm.value)) {
+      missingActualIncome += 1;
       continue;
     }
 
     const marketCap = price * stock.sharesOutstanding;
-    let expectedNetIncome = item.forecast?.netIncome;
-    let estimateMethod = 'FMP 예상 순이익 평균';
-    if ((expectedNetIncome === null || expectedNetIncome === undefined) && item.forecast?.eps !== null && item.forecast?.eps !== undefined) {
-      expectedNetIncome = item.forecast.eps * stock.sharesOutstanding;
-      estimateMethod = 'FMP 예상 EPS 평균 × 토스 발행주식수';
-    }
-    if (expectedNetIncome === null || expectedNetIncome === undefined || !Number.isFinite(expectedNetIncome)) {
-      noForecast += 1;
-      continue;
-    }
-
-    const earningsYield = expectedNetIncome / marketCap;
+    const earningsYield = item.ttm.value / marketCap;
     rows.push({
       symbol,
       name: item.name || stock.raw?.englishName || stock.raw?.name || symbol,
@@ -407,32 +425,32 @@ function buildRows(fundamentals, live, treasury) {
       price,
       sharesOutstanding: stock.sharesOutstanding,
       marketCap,
-      expectedNetIncome,
+      ttmNetIncome: item.ttm.value,
       earningsYield,
       treasurySpread: earningsYield - treasury.value / 100,
-      estimateDate: item.forecast?.date || null,
-      estimateMethod,
+      periodEnd: item.ttm.periodEnd,
+      incomeMethod: item.ttm.method,
     });
   }
-  return { rows, noForecast, noLivePrice };
+  return { rows, missingActualIncome, missingLiveData };
 }
 
 async function buildScreen(config, forceRefresh) {
-  const [fundamentals, treasury] = await Promise.all([
-    getFundamentals(config, forceRefresh),
+  const [actualIncome, treasury] = await Promise.all([
+    getActualIncome(config, forceRefresh),
     getTreasuryYield(config),
   ]);
-  const live = await getTossLiveData(fundamentals.items.map((item) => item.symbol), config);
-  const result = buildRows(fundamentals, live, treasury);
+  const live = await getTossLiveData(actualIncome.items.map((item) => item.symbol), config);
+  const result = buildRows(actualIncome, live, treasury);
   return {
     generatedAt: new Date().toISOString(),
     treasury,
     coverage: {
-      universe: fundamentals.items.length,
-      forwardEstimatesFailed: fundamentals.failedSymbols,
+      universe: actualIncome.items.length,
+      actualIncomeFailed: actualIncome.failedSymbols,
       rowsWithComparableData: result.rows.length,
-      missingForecast: result.noForecast,
-      missingLiveData: result.noLivePrice,
+      missingActualIncome: result.missingActualIncome,
+      missingLiveData: result.missingLiveData,
     },
     rows: result.rows.sort((a, b) => b.earningsYield - a.earningsYield),
   };
@@ -449,7 +467,7 @@ app.get('/api/config', async (_request, response, next) => {
 app.post('/api/config', async (request, response, next) => {
   try {
     const configured = await saveConfig(request.body || {});
-    response.status(201).json({ configured, message: 'API 키를 이 서버에 저장했습니다. 이후에는 다시 입력할 필요가 없습니다.' });
+    response.status(201).json({ configured, message: '연결 정보를 이 서버에 저장했습니다. 이후에는 다시 입력할 필요가 없습니다.' });
   } catch (error) {
     next(error);
   }
@@ -457,9 +475,12 @@ app.post('/api/config', async (request, response, next) => {
 
 app.post('/api/cache/refresh', async (_request, response, next) => {
   try {
-    await fs.rm(path.join(CACHE_DIRECTORY, 'forward-estimates.json'), { force: true });
-    await fs.rm(path.join(CACHE_DIRECTORY, 'sp500-constituents.json'), { force: true });
-    response.json({ message: '컨센서스 및 구성종목 캐시를 비웠습니다.' });
+    await Promise.all([
+      fs.rm(path.join(CACHE_DIRECTORY, 'ttm-net-income.json'), { force: true }),
+      fs.rm(path.join(CACHE_DIRECTORY, 'sp500-constituents.json'), { force: true }),
+      fs.rm(path.join(CACHE_DIRECTORY, 'forward-estimates.json'), { force: true }),
+    ]);
+    response.json({ message: '실제 순이익과 구성종목 캐시를 비웠습니다.' });
   } catch (error) {
     next(error);
   }
@@ -469,9 +490,9 @@ app.get('/api/screen', async (request, response, next) => {
   try {
     const config = await getConfig();
     if (!configurationStatus(config).complete) {
-      return response.status(428).json({ error: '먼저 API 키 설정을 완료해 주세요.', code: 'SETUP_REQUIRED' });
+      return response.status(428).json({ error: '먼저 데이터 연결 설정을 완료해 주세요.', code: 'SETUP_REQUIRED' });
     }
-    const forceRefresh = request.query.refresh === 'fundamentals';
+    const forceRefresh = request.query.refresh === 'actuals';
     if (!currentScreenPromise || forceRefresh) {
       currentScreenPromise = buildScreen(config, forceRefresh).finally(() => {
         currentScreenPromise = null;

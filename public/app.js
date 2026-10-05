@@ -6,7 +6,6 @@ const state = {
   aboveOnly: true,
   sort: { key: 'earningsYield', direction: 'desc' },
   search: '',
-  autoRefreshId: null,
 };
 
 const elements = {
@@ -24,7 +23,7 @@ const elements = {
   searchInput: document.querySelector('#search-input'),
   aboveOnlyToggle: document.querySelector('#above-only-toggle'),
   refreshButton: document.querySelector('#refresh-button'),
-  consensusRefreshButton: document.querySelector('#consensus-refresh-button'),
+  actualsRefreshButton: document.querySelector('#actuals-refresh-button'),
 };
 
 function escapeHtml(value) {
@@ -97,10 +96,10 @@ function renderTable() {
       <td>${escapeHtml(row.sector)}</td>
       <td class="numeric price">${usd(row.price)}</td>
       <td class="numeric">${usd(row.marketCap, true)}</td>
-      <td class="numeric estimate" title="${escapeHtml(row.estimateMethod)}">${usd(row.expectedNetIncome, true)}<span class="info-dot" aria-label="${escapeHtml(row.estimateMethod)}">i</span></td>
+      <td class="numeric estimate" title="${escapeHtml(row.incomeMethod)}">${usd(row.ttmNetIncome, true)}<span class="info-dot" aria-label="${escapeHtml(row.incomeMethod)}">i</span></td>
       <td class="numeric yield ${isPassing ? 'positive' : 'negative'}">${percent(row.earningsYield)}</td>
       <td class="numeric spread ${isPassing ? 'positive' : 'negative'}">${isPassing ? '+' : ''}${percent(row.treasurySpread)}</td>
-      <td class="date-cell">${row.estimateDate ? escapeHtml(row.estimateDate) : '—'}</td>
+      <td class="date-cell">${row.periodEnd ? escapeHtml(row.periodEnd) : '—'}</td>
     </tr>`;
   }).join('');
 }
@@ -127,12 +126,12 @@ async function jsonFetch(url, options) {
   return payload;
 }
 
-async function loadScreen({ refreshFundamentals = false, silent = false } = {}) {
-  if (!silent) setStatus(refreshFundamentals ? 'FMP 컨센서스와 S&P 500 구성종목을 새로 불러오는 중입니다. 최초 실행은 수 분 걸릴 수 있습니다…' : '토스증권 실시간 가격과 FRED 국채금리를 불러오는 중입니다…');
+async function loadScreen({ refreshActuals = false, silent = false } = {}) {
+  if (!silent) setStatus(refreshActuals ? 'SEC EDGAR 실제 순이익과 S&P 500 구성종목을 새로 불러오는 중입니다. 최초 실행은 약 1~2분 걸릴 수 있습니다…' : '토스증권 실시간 가격과 FRED 국채금리를 불러오는 중입니다…');
   elements.refreshButton.disabled = true;
-  elements.consensusRefreshButton.disabled = true;
+  elements.actualsRefreshButton.disabled = true;
   try {
-    const endpoint = `/api/screen?filter=all${refreshFundamentals ? '&refresh=fundamentals' : ''}`;
+    const endpoint = `/api/screen?filter=all${refreshActuals ? '&refresh=actuals' : ''}`;
     const payload = await jsonFetch(endpoint);
     state.rows = payload.rows;
     state.treasury = payload.treasury;
@@ -141,7 +140,8 @@ async function loadScreen({ refreshFundamentals = false, silent = false } = {}) 
     renderSummary();
     renderTable();
     const warnings = [];
-    if (payload.coverage.forwardEstimatesFailed) warnings.push(`FMP 예상 실적 미수신 ${payload.coverage.forwardEstimatesFailed}개`);
+    if (payload.coverage.actualIncomeFailed) warnings.push(`SEC 실제 순이익 미수신 ${payload.coverage.actualIncomeFailed}개`);
+    if (payload.coverage.missingActualIncome) warnings.push(`TTM 순이익 추출 불가 ${payload.coverage.missingActualIncome}개`);
     if (payload.coverage.missingLiveData) warnings.push(`토스 실시간 데이터 미수신 ${payload.coverage.missingLiveData}개`);
     setStatus(warnings.length ? `갱신 완료 · ${warnings.join(' · ')}` : '갱신 완료 · 주가와 국채금리는 60초마다 자동 갱신됩니다.', warnings.length ? 'warning' : 'success');
   } catch (error) {
@@ -149,7 +149,7 @@ async function loadScreen({ refreshFundamentals = false, silent = false } = {}) 
     if (state.rows.length) renderTable();
   } finally {
     elements.refreshButton.disabled = false;
-    elements.consensusRefreshButton.disabled = false;
+    elements.actualsRefreshButton.disabled = false;
   }
 }
 
@@ -167,7 +167,7 @@ async function initialize() {
   try {
     const payload = await jsonFetch('/api/config');
     if (!payload.configured.complete) {
-      setStatus('첫 사용 전 API 키 연결이 필요합니다.', 'warning');
+      setStatus('첫 사용 전 데이터 연결 설정이 필요합니다.', 'warning');
       showSettings();
       return;
     }
@@ -202,11 +202,11 @@ document.querySelector('#settings-button').addEventListener('click', showSetting
 document.querySelector('#close-settings-button').addEventListener('click', closeSettings);
 document.querySelector('#cancel-settings-button').addEventListener('click', closeSettings);
 elements.refreshButton.addEventListener('click', () => loadScreen());
-elements.consensusRefreshButton.addEventListener('click', async () => {
-  if (!window.confirm('FMP 예상 실적 캐시를 지우고 다시 받습니다. 첫 갱신은 수 분이 걸릴 수 있습니다. 계속할까요?')) return;
+elements.actualsRefreshButton.addEventListener('click', async () => {
+  if (!window.confirm('SEC 실제 순이익 캐시를 지우고 다시 받습니다. 약 1~2분 걸릴 수 있습니다. 계속할까요?')) return;
   try {
     await jsonFetch('/api/cache/refresh', { method: 'POST' });
-    await loadScreen({ refreshFundamentals: true });
+    await loadScreen({ refreshActuals: true });
   } catch (error) {
     setStatus(error.message, 'error');
   }
@@ -231,7 +231,7 @@ document.querySelectorAll('thead th[data-sort]').forEach((header) => {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && state.rows.length) loadScreen({ silent: true });
 });
-state.autoRefreshId = window.setInterval(() => {
+window.setInterval(() => {
   if (document.visibilityState === 'visible' && state.rows.length) loadScreen({ silent: true });
 }, 60_000);
 

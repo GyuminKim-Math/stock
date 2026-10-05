@@ -3,28 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="S&P 500의 다음 연도 예상 이익수익률과 1년 만기 미국 국채금리를 비교합니다." />
-    <title>S&P 500 · 국채 대비 이익수익률</title>
+    <meta name="description" content="S&P 500의 최근 12개월 실제 이익수익률과 1년 만기 미국 국채금리를 비교합니다." />
+    <title>S&P 500 · 국채 대비 실제 이익수익률</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
       <header class="site-header">
         <div>
-          <p class="eyebrow">FORWARD EARNINGS YIELD · LIVE PRICE</p>
-          <h1>S&P 500 국채 대비<br />이익수익률 스크리너</h1>
-          <p class="subtitle">다음 회계연도 예상 순이익 ÷ 토스증권 실시간 시가총액으로 계산합니다.</p>
+          <p class="eyebrow">TTM NET INCOME · LIVE PRICE</p>
+          <h1>S&P 500 국채 대비<br />실제 이익수익률 스크리너</h1>
+          <p class="subtitle">최근 12개월 실제 순이익 ÷ 토스증권 실시간 시가총액으로 계산합니다.</p>
         </div>
         <div class="header-actions">
-          <button class="button secondary" id="settings-button" type="button">API 설정</button>
+          <button class="button secondary" id="settings-button" type="button">데이터 설정</button>
           <button class="button primary" id="refresh-button" type="button">실시간 가격 새로고침</button>
         </div>
       </header>
 
       <section class="formula-card" aria-label="계산 방법">
         <div class="formula-label">판정식</div>
-        <div class="formula">예상이익수익률 <span>=</span> 다음 연도 예상 순이익 <span>÷</span> 실시간 시가총액 <strong>&gt;</strong> 1년 만기 미국 국채금리</div>
-        <p>가격·발행주식수는 토스증권 OpenAPI, 예상 실적은 FMP, 국채금리는 FRED DGS1을 사용합니다.</p>
+        <div class="formula">실제 이익수익률 <span>=</span> 최근 12개월 실제 순이익 <span>÷</span> 실시간 시가총액 <strong>&gt;</strong> 1년 만기 미국 국채금리</div>
+        <p>가격·발행주식수는 토스증권 OpenAPI, 실제 순이익은 SEC EDGAR 공시, 국채금리는 FRED DGS1을 사용합니다.</p>
       </section>
 
       <section class="metrics" aria-live="polite">
@@ -41,12 +41,12 @@
         <article class="metric-card">
           <span>비교 가능 데이터</span>
           <strong id="coverage-count">—</strong>
-          <small id="coverage-detail">예상 실적 + 실시간 가격</small>
+          <small id="coverage-detail">TTM 실제 순이익 + 실시간 가격</small>
         </article>
         <article class="metric-card">
           <span>마지막 갱신</span>
           <strong id="updated-time">—</strong>
-          <small>자동 갱신: 60초</small>
+          <small>가격 자동 갱신: 60초</small>
         </article>
       </section>
 
@@ -60,9 +60,9 @@
             <input id="above-only-toggle" type="checkbox" checked />
             <span>국채금리 초과 종목만</span>
           </label>
-          <button class="text-button" id="consensus-refresh-button" type="button">컨센서스 다시 받기</button>
+          <button class="text-button" id="actuals-refresh-button" type="button">실제 실적 다시 받기</button>
         </div>
-        <div class="status-line" id="status-line">API 설정을 확인하는 중입니다…</div>
+        <div class="status-line" id="status-line">데이터 설정을 확인하는 중입니다…</div>
         <div class="table-scroll">
           <table>
             <thead>
@@ -72,10 +72,10 @@
                 <th data-sort="sector">섹터</th>
                 <th data-sort="price" class="numeric">실시간 주가</th>
                 <th data-sort="marketCap" class="numeric">시가총액</th>
-                <th data-sort="expectedNetIncome" class="numeric">다음 연도 예상 순이익</th>
-                <th data-sort="earningsYield" class="numeric active-sort">예상이익수익률</th>
+                <th data-sort="ttmNetIncome" class="numeric">TTM 실제 순이익</th>
+                <th data-sort="earningsYield" class="numeric active-sort">실제 이익수익률</th>
                 <th data-sort="treasurySpread" class="numeric">국채 대비</th>
-                <th>예상 기준일</th>
+                <th>TTM 종료일</th>
               </tr>
             </thead>
             <tbody id="results-body"></tbody>
@@ -84,7 +84,7 @@
       </section>
 
       <footer>
-        <strong>투자 유의사항.</strong> 본 도구는 정보·학습 목적의 스크리너이며 투자 조언이나 매수 추천이 아닙니다. 컨센서스는 변경될 수 있고, 손실·부채·현금흐름·성장률·산업별 위험은 이 계산에 반영되지 않습니다.
+        <strong>투자 유의사항.</strong> 본 도구는 정보·학습 목적의 스크리너이며 투자 조언이나 매수 추천이 아닙니다. 실제 순이익은 미래 수익을 보장하지 않으며, 부채·현금흐름·성장률·일회성 손익·산업별 위험은 이 계산에 반영되지 않습니다.
       </footer>
     </main>
 
@@ -97,12 +97,12 @@
           </div>
           <button class="icon-button" id="close-settings-button" type="button" aria-label="설정 창 닫기">×</button>
         </div>
-        <p class="dialog-intro">키는 이 서버의 <code>data/config.json</code>에 권한 0600으로 저장되며, 화면이나 API 응답으로 다시 전송되지 않습니다. 이후에는 빈칸으로 두면 기존 값을 유지합니다.</p>
+        <p class="dialog-intro">토스·FRED 키와 SEC 연락처 이메일은 이 서버의 <code>data/config.json</code>에 권한 0600으로 저장되며, 화면이나 API 응답으로 다시 전송되지 않습니다. 이후에는 빈칸으로 두면 기존 값을 유지합니다.</p>
         <label>토스증권 Client ID<input name="tossClientId" type="password" autocomplete="off" placeholder="최초 설정 시 입력" /></label>
         <label>토스증권 Client Secret<input name="tossClientSecret" type="password" autocomplete="off" placeholder="최초 설정 시 입력" /></label>
-        <label>FMP API Key<input name="fmpApiKey" type="password" autocomplete="off" placeholder="Financial Modeling Prep API Key" /></label>
         <label>FRED API Key<input name="fredApiKey" type="password" autocomplete="off" placeholder="32자 FRED API Key" /></label>
-        <p class="setup-note">토스 OpenAPI는 호출 서버의 IP를 토스증권 WTS Open API 설정에 허용 IP로 등록해야 합니다.</p>
+        <label>SEC 연락처 이메일<input name="secContactEmail" type="email" autocomplete="email" placeholder="you@example.com" /></label>
+        <p class="setup-note">SEC EDGAR는 공개 공시 API이며 키가 필요 없습니다. 다만 공정한 이용을 위해 요청에 연락처 이메일을 식별 정보로 포함합니다. 토스 OpenAPI는 호출 서버의 IP를 토스증권 WTS Open API 설정에 허용 IP로 등록해야 합니다.</p>
         <p class="form-error" id="form-error" role="alert"></p>
         <div class="dialog-actions">
           <button class="button secondary" id="cancel-settings-button" type="button">취소</button>
