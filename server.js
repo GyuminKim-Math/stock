@@ -125,9 +125,18 @@ async function saveConfig(values) {
   for (const key of ['tossClientId', 'tossClientSecret', 'fmpApiKey', 'fredApiKey']) {
     if (typeof values[key] === 'string' && values[key].trim()) next[key] = values[key].trim();
   }
-  const status = configurationStatus(mergeConfig(next));
+  const effectiveConfig = mergeConfig(next);
+  const status = configurationStatus(effectiveConfig);
   if (!status.complete) {
-    throw new Error('토스 Client ID·Secret, FMP API Key, FRED API Key를 모두 입력해 주세요.');
+    const labels = {
+      toss: '토스 Client ID 또는 Client Secret',
+      fmp: 'FMP API Key',
+      fred: 'FRED API Key',
+    };
+    const missing = Object.entries(status)
+      .filter(([key, present]) => key !== 'complete' && !present)
+      .map(([key]) => labels[key]);
+    throw new Error(`다음 값을 입력해 주세요: ${missing.join(', ')}.`);
   }
   await writePrivateJson(CONFIG_FILE, next);
   tokenCache = { accessToken: null, expiresAt: 0 };
