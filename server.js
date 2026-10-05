@@ -178,6 +178,9 @@ async function fetchJson(url, options, service) {
 
   if (!response.ok) {
     const detail = payload?.error?.message || payload?.['Error Message'] || payload?.message || (typeof payload === 'string' ? payload : '요청이 거부되었습니다.');
+    if (service === '토스증권' && response.status === 403) {
+      throw new ExternalServiceError(service, '토스증권 요청 실패 (403): 이 서버의 공인 IP가 토스증권 WTS Open API 허용 IP 목록에 등록되지 않았거나, Open API 권한이 아직 활성화되지 않았습니다.', response.status);
+    }
     throw new ExternalServiceError(service, `${service} 요청 실패 (${response.status}): ${detail}`, response.status);
   }
   return payload;
