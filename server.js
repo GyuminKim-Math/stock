@@ -96,8 +96,7 @@ function envConfig() {
   };
 }
 
-async function getConfig() {
-  const saved = (await readJsonFile(CONFIG_FILE)) || {};
+function mergeConfig(saved = {}) {
   const env = envConfig();
   return {
     tossClientId: env.tossClientId || saved.tossClientId || '',
@@ -105,6 +104,10 @@ async function getConfig() {
     fmpApiKey: env.fmpApiKey || saved.fmpApiKey || '',
     fredApiKey: env.fredApiKey || saved.fredApiKey || '',
   };
+}
+
+async function getConfig() {
+  return mergeConfig((await readJsonFile(CONFIG_FILE)) || {});
 }
 
 function configurationStatus(config) {
@@ -122,7 +125,7 @@ async function saveConfig(values) {
   for (const key of ['tossClientId', 'tossClientSecret', 'fmpApiKey', 'fredApiKey']) {
     if (typeof values[key] === 'string' && values[key].trim()) next[key] = values[key].trim();
   }
-  const status = configurationStatus({ ...next, ...envConfig() });
+  const status = configurationStatus(mergeConfig(next));
   if (!status.complete) {
     throw new Error('토스 Client ID·Secret, FMP API Key, FRED API Key를 모두 입력해 주세요.');
   }
