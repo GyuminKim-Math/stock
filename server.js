@@ -11,6 +11,7 @@ const CONFIG_FILE = path.join(DATA_DIRECTORY, 'config.json');
 const CACHE_DIRECTORY = path.join(DATA_DIRECTORY, 'cache');
 const TOSS_BASE_URL = 'https://openapi.tossinvest.com';
 const SEC_COMPANY_FACTS_BASE_URL = 'https://data.sec.gov/api/xbrl/companyfacts';
+const SEC_COMPANY_TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
 const SP500_CONSTITUENTS_CSV_URL = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv';
 const ACTUALS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CONSTITUENTS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -226,13 +227,32 @@ async function tossRequest(endpoint, token) {
   }, '토스증권');
 }
 
+async function getTossActiveUsSymbols(config) {
+  const cached = await getCached('toss-active-us-symbols', CONSTITUENTS_CACHE_TTL_MS);
+  if (cached) return new Set(cached);
+
+  const token = await getTossToken(config);
+  const symbols = new Set();
+  for (const market of ['NYSE', 'NASDAQ', 'AMEX']) {
+    const payload = await tossRequest(`/api/v1/stocks/all?market=${market}&status=ACTIVE`, token);
+    for (const item of getList(payload)) {
+      const symbol = normalizeTicker(item?.symbol || item?.code);
+      if (symbol) symbols.add(symbol);
+    }
+    await sleep(1_050);
+  }
+  if (!symbols.size) throw new ExternalServiceError('토스증권', '미국 거래 가능 종목 목록을 받지 못했습니다.');
+  await setCached('toss-active-us-symbols', [...symbols]);
+  return symbols;
+}
+
 function chunks(values, size) {
   return Array.from({ length: Math.ceil(values.length / size) }, (_, index) => values.slice(index * size, (index + 1) * size));
 }
 
 async function getTossLiveData(symbols, config) {
   const token = await getTossToken(config);
-  const groups = chunks(symbols, 200);
+  const groups = chunks([...new Set(symbols)], 200);
   const priceResponses = await Promise.all(groups.map((group) => tossRequest(`/api/v1/prices?symbols=${encodeURIComponent(group.join(','))}`, token)));
   const stockResponses = await Promise.all(groups.map((group) => tossRequest(`/api/v1/stocks?symbols=${encodeURIComponent(group.join(','))}`, token)));
 
@@ -306,6 +326,53 @@ async function getConstituents(forceRefresh) {
   return constituents;
 }
 
+function normalizeTicker(symbol) {
+  return String(symbol || '').trim().toUpperCase().replaceAll('-', '.');
+}
+
+async function getSecIssuerTickers(config, forceRefresh) {
+  if (!forceRefresh) {
+    const cached = await getCached('sec-issuer-tickers', CONSTITUENTS_CACHE_TTL_MS);
+    if (cached) return cached;
+  }
+  const payload = await fetchJson(SEC_COMPANY_TICKERS_URL, {
+    headers: { 'User-Agent': `sp500-treasury-screener/1.0 ${config.secContactEmail}` },
+  }, 'SEC EDGAR');
+  const tickersByCik = {};
+  for (const entry of Object.values(payload || {})) {
+    const cik = String(entry?.cik_str || '').padStart(10, '0');
+    const symbol = normalizeTicker(entry?.ticker);
+    if (!cik || !symbol || !/^[A-Z0-9.-]+$/.test(symbol)) continue;
+    if (!tickersByCik[cik]) tickersByCik[cik] = [];
+    if (!tickersByCik[cik].includes(symbol)) tickersByCik[cik].push(symbol);
+  }
+  await setCached('sec-issuer-tickers', tickersByCik);
+  return tickersByCik;
+}
+
+async function getIssuers(config, forceRefresh) {
+  const [constituents, secTickersByCik] = await Promise.all([
+    getConstituents(forceRefresh),
+    getSecIssuerTickers(config, forceRefresh),
+  ]);
+  const issuerByCik = new Map();
+  for (const constituent of constituents) {
+    const issuer = issuerByCik.get(constituent.cik) || {
+      cik: constituent.cik,
+      name: constituent.name,
+      sector: constituent.sector,
+      sp500Symbols: [],
+    };
+    issuer.sp500Symbols.push(constituent.symbol);
+    issuerByCik.set(constituent.cik, issuer);
+  }
+  const issuers = [...issuerByCik.values()].map((issuer) => ({
+    ...issuer,
+    classSymbols: [...new Set([...(secTickersByCik[issuer.cik] || []), ...issuer.sp500Symbols])].sort(),
+  }));
+  return { constituents, issuers };
+}
+
 async function secRequest(cik, config) {
   const scheduledAt = Math.max(Date.now(), nextSecRequestAt);
   nextSecRequestAt = scheduledAt + SEC_REQUEST_INTERVAL_MS;
@@ -369,21 +436,27 @@ async function mapWithConcurrency(items, limit, worker) {
 
 async function getActualIncome(config, forceRefresh) {
   if (!forceRefresh) {
-    const cached = await getCached('ttm-net-income', ACTUALS_CACHE_TTL_MS);
+    const cached = await getCached('ttm-net-income-v3', ACTUALS_CACHE_TTL_MS);
     if (cached) return cached;
   }
-  const constituents = await getConstituents(forceRefresh);
-  const details = await mapWithConcurrency(constituents, 5, async (constituent) => {
-    const ttm = extractTtmNetIncome(await secRequest(constituent.cik, config));
-    return { ...constituent, ttm };
+  const { constituents, issuers } = await getIssuers(config, forceRefresh);
+  const details = await mapWithConcurrency(issuers, 5, async (issuer) => {
+    const ttm = extractTtmNetIncome(await secRequest(issuer.cik, config));
+    return { ...issuer, ttm };
   });
   const errors = details.filter((item) => item?.error);
   const items = details.filter((item) => !item?.error);
-  if (!items.length || errors.length === constituents.length) {
+  if (!items.length || errors.length === issuers.length) {
     throw new ExternalServiceError('SEC EDGAR', errors[0]?.error || '실제 순이익 데이터를 받지 못했습니다. SEC 연락처 이메일과 네트워크를 확인해 주세요.');
   }
-  const data = { items, failedSymbols: errors.length, generatedAt: new Date().toISOString() };
-  await setCached('ttm-net-income', data);
+  const data = {
+    items,
+    failedIssuers: errors.length,
+    constituentCount: constituents.length,
+    issuerCount: issuers.length,
+    generatedAt: new Date().toISOString(),
+  };
+  await setCached('ttm-net-income-v3', data);
   return data;
 }
 
@@ -404,38 +477,48 @@ async function getTreasuryYield(config) {
 function buildRows(actualIncome, live, treasury) {
   const rows = [];
   let missingActualIncome = 0;
-  let missingLiveData = 0;
+  let incompleteIssuerMarketCap = 0;
 
-  for (const item of actualIncome.items) {
-    const symbol = item.symbol.toUpperCase();
-    const price = live.priceBySymbol.get(symbol);
-    const stock = live.stockBySymbol.get(symbol);
-    if (!price || !stock?.sharesOutstanding) {
-      missingLiveData += 1;
-      continue;
-    }
-    if (!item.ttm || !Number.isFinite(item.ttm.value)) {
+  for (const issuer of actualIncome.items) {
+    if (!issuer.ttm || !Number.isFinite(issuer.ttm.value)) {
       missingActualIncome += 1;
       continue;
     }
 
-    const marketCap = price * stock.sharesOutstanding;
-    const earningsYield = item.ttm.value / marketCap;
+    if (!issuer.classSymbols.length) {
+      incompleteIssuerMarketCap += 1;
+      continue;
+    }
+    const classQuotes = issuer.classSymbols.map((symbol) => {
+      const price = live.priceBySymbol.get(symbol);
+      const stock = live.stockBySymbol.get(symbol);
+      if (!price || !stock?.sharesOutstanding) return null;
+      return { symbol, price, sharesOutstanding: stock.sharesOutstanding, marketCap: price * stock.sharesOutstanding };
+    });
+    if (classQuotes.some((quote) => !quote)) {
+      incompleteIssuerMarketCap += 1;
+      continue;
+    }
+
+    const combinedMarketCap = classQuotes.reduce((total, quote) => total + quote.marketCap, 0);
+    const earningsYield = issuer.ttm.value / combinedMarketCap;
     rows.push({
-      symbol,
-      name: item.name || stock.raw?.englishName || stock.raw?.name || symbol,
-      sector: item.sector || '—',
-      price,
-      sharesOutstanding: stock.sharesOutstanding,
-      marketCap,
-      ttmNetIncome: item.ttm.value,
+      symbol: issuer.classSymbols.join(' / '),
+      symbols: issuer.classSymbols,
+      name: issuer.name,
+      sector: issuer.sector || '—',
+      price: classQuotes[0].price,
+      classQuotes,
+      marketCap: combinedMarketCap,
+      ttmNetIncome: issuer.ttm.value,
       earningsYield,
       treasurySpread: earningsYield - treasury.value / 100,
-      periodEnd: item.ttm.periodEnd,
-      incomeMethod: item.ttm.method,
+      periodEnd: issuer.ttm.periodEnd,
+      incomeMethod: issuer.ttm.method,
+      multiClass: issuer.classSymbols.length > 1,
     });
   }
-  return { rows, missingActualIncome, missingLiveData };
+  return { rows, missingActualIncome, incompleteIssuerMarketCap };
 }
 
 async function buildScreen(config, forceRefresh) {
@@ -443,17 +526,24 @@ async function buildScreen(config, forceRefresh) {
     getActualIncome(config, forceRefresh),
     getTreasuryYield(config),
   ]);
-  const live = await getTossLiveData(actualIncome.items.map((item) => item.symbol), config);
-  const result = buildRows(actualIncome, live, treasury);
+  const activeUsSymbols = await getTossActiveUsSymbols(config);
+  const issuers = actualIncome.items.map((issuer) => ({
+    ...issuer,
+    classSymbols: issuer.classSymbols.filter((symbol) => activeUsSymbols.has(symbol)),
+  }));
+  const live = await getTossLiveData(issuers.flatMap((issuer) => issuer.classSymbols), config);
+  const result = buildRows({ ...actualIncome, items: issuers }, live, treasury);
   return {
     generatedAt: new Date().toISOString(),
     treasury,
     coverage: {
-      universe: actualIncome.items.length,
-      actualIncomeFailed: actualIncome.failedSymbols,
+      universe: actualIncome.constituentCount,
+      issuers: actualIncome.issuerCount,
+      multiClassIssuers: issuers.filter((issuer) => issuer.classSymbols.length > 1).length,
+      actualIncomeFailed: actualIncome.failedIssuers,
       rowsWithComparableData: result.rows.length,
       missingActualIncome: result.missingActualIncome,
-      missingLiveData: result.missingLiveData,
+      incompleteIssuerMarketCap: result.incompleteIssuerMarketCap,
     },
     rows: result.rows.sort((a, b) => b.earningsYield - a.earningsYield),
   };
@@ -479,8 +569,12 @@ app.post('/api/config', async (request, response, next) => {
 app.post('/api/cache/refresh', async (_request, response, next) => {
   try {
     await Promise.all([
+      fs.rm(path.join(CACHE_DIRECTORY, 'ttm-net-income-v3.json'), { force: true }),
+      fs.rm(path.join(CACHE_DIRECTORY, 'ttm-net-income-v2.json'), { force: true }),
       fs.rm(path.join(CACHE_DIRECTORY, 'ttm-net-income.json'), { force: true }),
       fs.rm(path.join(CACHE_DIRECTORY, 'sp500-constituents.json'), { force: true }),
+      fs.rm(path.join(CACHE_DIRECTORY, 'sec-issuer-tickers.json'), { force: true }),
+      fs.rm(path.join(CACHE_DIRECTORY, 'toss-active-us-symbols.json'), { force: true }),
       fs.rm(path.join(CACHE_DIRECTORY, 'forward-estimates.json'), { force: true }),
     ]);
     response.json({ message: '실제 순이익과 구성종목 캐시를 비웠습니다.' });

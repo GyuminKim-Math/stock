@@ -24,7 +24,7 @@
       <section class="formula-card" aria-label="계산 방법">
         <div class="formula-label">판정식</div>
         <div class="formula">실제 이익수익률 <span>=</span> 최근 12개월 실제 순이익 <span>÷</span> 실시간 시가총액 <strong>&gt;</strong> 1년 만기 미국 국채금리</div>
-        <p>가격·발행주식수는 토스증권 OpenAPI, 실제 순이익은 SEC EDGAR 공시, 국채금리는 FRED DGS1을 사용합니다.</p>
+        <p>가격·발행주식수는 토스증권 OpenAPI, 실제 순이익은 SEC EDGAR 공시, 국채금리는 FRED DGS1을 사용합니다. 복수 클래스 기업은 모든 상장 클래스의 시가총액을 합산합니다.</p>
       </section>
 
       <section class="metrics" aria-live="polite">
@@ -70,8 +70,8 @@
                 <th data-sort="rank" class="rank-column">#</th>
                 <th data-sort="symbol">종목</th>
                 <th data-sort="sector">섹터</th>
-                <th data-sort="price" class="numeric">실시간 주가</th>
-                <th data-sort="marketCap" class="numeric">시가총액</th>
+                <th data-sort="price" class="numeric">클래스별 실시간 주가</th>
+                <th data-sort="marketCap" class="numeric">기업 시가총액</th>
                 <th data-sort="ttmNetIncome" class="numeric">TTM 실제 순이익</th>
                 <th data-sort="earningsYield" class="numeric active-sort">실제 이익수익률</th>
                 <th data-sort="treasurySpread" class="numeric">국채 대비</th>

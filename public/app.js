@@ -61,7 +61,7 @@ function currentRows() {
   const treasuryRate = state.treasury?.value / 100;
   const filtered = state.rows.filter((row) => {
     const matchesFilter = !state.aboveOnly || row.earningsYield > treasuryRate;
-    const matchesSearch = !query || [row.symbol, row.name, row.sector].some((value) => String(value).toLocaleLowerCase('en-US').includes(query));
+    const matchesSearch = !query || [row.symbol, row.name, row.sector, ...(row.symbols || [])].some((value) => String(value).toLocaleLowerCase('en-US').includes(query));
     return matchesFilter && matchesSearch;
   });
   return filtered.sort((left, right) => {
@@ -81,6 +81,12 @@ function renderSortIndicators() {
   });
 }
 
+function formatPrice(row) {
+  if (!row.classQuotes?.length) return '—';
+  if (row.classQuotes.length === 1) return usd(row.classQuotes[0].price);
+  return row.classQuotes.map((quote) => `${escapeHtml(quote.symbol)} ${usd(quote.price)}`).join('<br />');
+}
+
 function renderTable() {
   const rows = currentRows();
   renderSortIndicators();
@@ -94,7 +100,7 @@ function renderTable() {
       <td class="rank-column">${index + 1}</td>
       <td><div class="company"><strong>${escapeHtml(row.symbol)}</strong><span>${escapeHtml(row.name)}</span></div></td>
       <td>${escapeHtml(row.sector)}</td>
-      <td class="numeric price">${usd(row.price)}</td>
+      <td class="numeric price">${formatPrice(row)}</td>
       <td class="numeric">${usd(row.marketCap, true)}</td>
       <td class="numeric estimate" title="${escapeHtml(row.incomeMethod)}">${usd(row.ttmNetIncome, true)}<span class="info-dot" aria-label="${escapeHtml(row.incomeMethod)}">i</span></td>
       <td class="numeric yield ${isPassing ? 'positive' : 'negative'}">${percent(row.earningsYield)}</td>
@@ -110,7 +116,7 @@ function renderSummary() {
   elements.treasuryDate.textContent = `FRED DGS1 · ${state.treasury.date}`;
   elements.passingCount.textContent = `${passing}개`;
   elements.coverageCount.textContent = `${state.coverage.rowsWithComparableData}개`;
-  elements.coverageDetail.textContent = `S&P 500 ${state.coverage.universe}개 중 비교 가능`;
+  elements.coverageDetail.textContent = `S&P 500 ${state.coverage.universe}개 종목 · ${state.coverage.issuers}개 기업 기준`;
   elements.updatedTime.textContent = localTime(state.generatedAt);
 }
 
@@ -140,9 +146,10 @@ async function loadScreen({ refreshActuals = false, silent = false } = {}) {
     renderSummary();
     renderTable();
     const warnings = [];
-    if (payload.coverage.actualIncomeFailed) warnings.push(`SEC 실제 순이익 미수신 ${payload.coverage.actualIncomeFailed}개`);
-    if (payload.coverage.missingActualIncome) warnings.push(`TTM 순이익 추출 불가 ${payload.coverage.missingActualIncome}개`);
-    if (payload.coverage.missingLiveData) warnings.push(`토스 실시간 데이터 미수신 ${payload.coverage.missingLiveData}개`);
+    if (payload.coverage.actualIncomeFailed) warnings.push(`SEC 실제 순이익 미수신 ${payload.coverage.actualIncomeFailed}개 기업`);
+    if (payload.coverage.missingActualIncome) warnings.push(`TTM 순이익 추출 불가 ${payload.coverage.missingActualIncome}개 기업`);
+    if (payload.coverage.incompleteIssuerMarketCap) warnings.push(`전체 클래스 시가총액 미확인 ${payload.coverage.incompleteIssuerMarketCap}개 기업`);
+    if (payload.coverage.multiClassIssuers) warnings.push(`복수 클래스 ${payload.coverage.multiClassIssuers}개 기업은 합산 시가총액 적용`);
     setStatus(warnings.length ? `갱신 완료 · ${warnings.join(' · ')}` : '갱신 완료 · 주가와 국채금리는 60초마다 자동 갱신됩니다.', warnings.length ? 'warning' : 'success');
   } catch (error) {
     setStatus(error.message, 'error');
