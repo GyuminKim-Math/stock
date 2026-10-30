@@ -8,16 +8,23 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="shell">
+    <a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
+    <nav class="topbar" aria-label="주 메뉴"><div class="nav-inner">
+      <a class="brand" href="/" data-home><span class="brand-mark" aria-hidden="true">↗</span> EQUITY<span class="brand-light">/ NOTE</span></a>
+      <a class="nav-link" href="/" data-home>마켓 스크리너</a>
+      <span class="market-label"><i></i> S&amp;P 500 · US MARKET</span>
+    </div></nav>
+    <main class="shell" id="main-content">
+      <div id="dashboard-view">
       <header class="site-header">
         <div>
-          <p class="eyebrow">TTM NET INCOME · LIVE PRICE</p>
-          <h1>S&P 500 국채 대비<br />실제 이익수익률 스크리너</h1>
-          <p class="subtitle">최근 12개월 실제 순이익 ÷ 토스증권 실시간 시가총액으로 계산합니다.</p>
+          <p class="eyebrow">THE MARKET, IN PERSPECTIVE</p>
+          <h1>숫자로 보는 시장,<br /><span class="heading-muted">가치의 기준을 찾다.</span></h1>
+          <p class="subtitle">S&amp;P 500 기업의 실제 이익수익률과 미국 국채금리를 한눈에 비교하세요.</p>
         </div>
         <div class="header-actions">
           <button class="button secondary" id="settings-button" type="button">데이터 설정</button>
-          <button class="button primary" id="refresh-button" type="button">실시간 가격 새로고침</button>
+          <button class="button primary" id="refresh-button" type="button">↻ 가격 새로고침</button>
         </div>
       </header>
 
@@ -50,7 +57,8 @@
         </article>
       </section>
 
-      <section class="screening-panel">
+      <section class="screening-panel" aria-labelledby="screening-title">
+        <div class="panel-heading"><div><p class="eyebrow">EXPLORE EQUITIES</p><h2 id="screening-title">기업 둘러보기 <span id="visible-count" class="count-badge">0</span></h2></div><span class="panel-hint">기업명을 선택하면 상세 정보를 볼 수 있어요 ↗</span></div>
         <div class="toolbar">
           <label class="search-field">
             <span class="visually-hidden">종목 검색</span>
@@ -67,7 +75,7 @@
           <table>
             <thead>
               <tr>
-                <th data-sort="rank" class="rank-column">#</th>
+                <th class="rank-column">#</th>
                 <th data-sort="symbol">종목</th>
                 <th data-sort="sector">섹터</th>
                 <th data-sort="price" class="numeric">클래스별 실시간 주가</th>
@@ -83,6 +91,8 @@
         </div>
       </section>
 
+      </div>
+      <section id="company-view" hidden aria-label="기업 상세 정보" aria-live="polite"></section>
       <footer>
         <strong>투자 유의사항.</strong> 본 도구는 정보·학습 목적의 스크리너이며 투자 조언이나 매수 추천이 아닙니다. 실제 순이익은 미래 수익을 보장하지 않으며, 부채·현금흐름·성장률·일회성 손익·산업별 위험은 이 계산에 반영되지 않습니다.
       </footer>
@@ -97,7 +107,7 @@
           </div>
           <button class="icon-button" id="close-settings-button" type="button" aria-label="설정 창 닫기">×</button>
         </div>
-        <p class="dialog-intro">토스·FRED 키와 SEC 연락처 이메일은 이 서버의 <code>data/config.json</code>에 권한 0600으로 저장되며, 화면이나 API 응답으로 다시 전송되지 않습니다. 이후에는 빈칸으로 두면 기존 값을 유지합니다.</p>
+        <p class="dialog-intro">토스·FRED 키와 SEC 연락처 이메일은 이 서버에 안전하게 저장되며, 화면으로 다시 전송되지 않습니다. 이후에는 빈칸으로 두면 기존 값을 유지합니다.</p>
         <label>토스증권 Client ID<input name="tossClientId" type="password" autocomplete="off" placeholder="최초 설정 시 입력" /></label>
         <label>토스증권 Client Secret<input name="tossClientSecret" type="password" autocomplete="off" placeholder="최초 설정 시 입력" /></label>
         <label>FRED API Key<input name="fredApiKey" type="password" autocomplete="off" placeholder="32자 FRED API Key" /></label>

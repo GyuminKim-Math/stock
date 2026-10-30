@@ -503,6 +503,7 @@ function buildRows(actualIncome, live, treasury) {
     const combinedMarketCap = classQuotes.reduce((total, quote) => total + quote.marketCap, 0);
     const earningsYield = issuer.ttm.value / combinedMarketCap;
     rows.push({
+      cik: issuer.cik,
       symbol: issuer.classSymbols.join(' / '),
       symbols: issuer.classSymbols,
       name: issuer.name,
@@ -604,6 +605,10 @@ app.get('/api/screen', async (request, response, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get('/company/:symbol', (_request, response) => {
+  response.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
